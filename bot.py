@@ -2,17 +2,18 @@ import os
 import logging
 import random
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    MessageHandler, 
-    CallbackQueryHandler, 
-    ContextTypes, 
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
     filters
 )
 import aiohttp
+import asyncio
 
 # Enable logging
 logging.basicConfig(
@@ -21,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Language mappings with cultural facts
+# Language mappings
 LANGUAGES = {
     'en': {'name': 'English', 'flag': '🇬🇧', 'fact': 'English is the most widely spoken language with over 1.5 billion speakers.'},
     'es': {'name': 'Spanish', 'flag': '🇪🇸', 'fact': 'Spanish is the second most spoken language with over 500 million native speakers.'},
@@ -50,10 +51,6 @@ LANGUAGES = {
     'sv': {'name': 'Swedish', 'flag': '🇸🇪', 'fact': 'Swedish is closely related to Danish and Norwegian.'}
 }
 
-# User preferences storage
-user_preferences: Dict[int, Dict] = {}
-translation_history: Dict[int, list] = {}
-
 # Cultural facts
 CULTURAL_FACTS = [
     "The word 'hello' comes from the Old English word 'hēlā' meaning 'whole'.",
@@ -71,16 +68,29 @@ CULTURAL_FACTS = [
     "The Korean word '정' (jeong) describes a deep emotional bond.",
     "In Arabic, 'سلام' (salam) means 'peace'.",
     "The Thai phrase 'สวัสดี' (sawasdee) is a greeting.",
+    "Learning a new language opens up a whole new world of opportunities!",
+    "Bilingual people have better problem-solving skills.",
+    "The most translated document in the world is the Universal Declaration of Human Rights.",
+    "There are over 7,000 languages spoken in the world today.",
 ]
+
+# Store user preferences
+user_preferences: Dict[int, Dict] = {}
+translation_history: Dict[int, List[Dict]] = {}
+
+# ==================== COMMAND HANDLERS ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user = update.effective_user
+    user_id = user.id
     
     # Set default preferences
-    user_id = user.id
     if user_id not in user_preferences:
-        user_preferences[user_id] = {'target_lang': 'en', 'history_enabled': True}
+        user_preferences[user_id] = {
+            'target_lang': 'en',
+            'history_enabled': True
+        }
     
     welcome_message = (
         f"🌍 *Welcome to PolyglotPulseBot, {user.first_name}!* 🎉\n\n"
@@ -286,8 +296,10 @@ async def perform_translation(update: Update, text: str):
     pref = user_preferences.get(user_id, {})
     target_lang = pref.get('target_lang', 'en')
     
+    # Show typing indicator
     await update.message.chat.send_action(action="typing")
     
+    # Translate the text
     translated_text = await translate_text(text, target_lang)
     
     lang_data = LANGUAGES.get(target_lang, {'name': 'English', 'flag': '🇬🇧', 'fact': ''})
@@ -301,6 +313,7 @@ async def perform_translation(update: Update, text: str):
         'language': f"{lang_data['flag']} {lang_data['name']}",
         'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M")
     })
+    # Keep only last 100 translations
     if len(translation_history[user_id]) > 100:
         translation_history[user_id] = translation_history[user_id][-100:]
     
@@ -327,19 +340,23 @@ async def perform_translation(update: Update, text: str):
 async def translate_text(text: str, target_lang: str) -> str:
     """Translate text using free API"""
     try:
+        # Using MyMemory Translation API
         url = f"https://api.mymemory.translated.net/get?q={text}&langpair=en|{target_lang}"
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
+            async with session.get(url, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
                     if 'responseData' in data and 'translatedText' in data['responseData']:
                         return data['responseData']['translatedText']
         
-        return f"⚠️ Could not translate. Original:\n\n{text}"
+        return f"⚠️ Could not translate. Original text:\n\n{text}"
+    except asyncio.TimeoutError:
+        logger.error("Translation timeout")
+        return f"⏰ Translation timeout. Original text:\n\n{text}"
     except Exception as e:
         logger.error(f"Translation error: {e}")
-        return f"⚠️ Translation error. Original:\n\n{text}"
+        return f"⚠️ Translation error. Original text:\n\n{text}"
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard callbacks"""
@@ -350,6 +367,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     if data == "set_lang":
+        # Show language selection
         keyboard = []
         row = []
         for i, (code, lang_data) in enumerate(LANGUAGES.items()):
@@ -462,36 +480,47 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "⚠️ Sorry, an error occurred. Please try again later."
+            "⚠️ Sorry, an error occurred. Please try again later.\n"
+            "If the problem persists, contact the bot administrator."
         )
 
 def main():
     """Start the bot"""
+    # Get token from environment variable
     token = os.environ.get('TELEGRAM_TOKEN')
+    
     if not token:
-        logger.error("TELEGRAM_TOKEN environment variable not set!")
+        logger.error("❌ TELEGRAM_TOKEN environment variable not set!")
+        logger.error("Please set it in Railway: Variables -> TELEGRAM_TOKEN")
         return
     
     logger.info("🌍 Starting PolyglotPulseBot...")
     
-    application = Application.builder().token(token).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("setlang", set_language_command))
-    application.add_handler(CommandHandler("mylang", my_language_command))
-    application.add_handler(CommandHandler("languages", list_languages_command))
-    application.add_handler(CommandHandler("translate", translate_command))
-    application.add_handler(CommandHandler("fact", fact_command))
-    application.add_handler(CommandHandler("history", history_command))
-    application.add_handler(CommandHandler("clear", clear_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    application.add_error_handler(error_handler)
-    
-    logger.info("✅ Bot started successfully! Ready to translate! 🌍")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Create application
+        application = Application.builder().token(token).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("setlang", set_language_command))
+        application.add_handler(CommandHandler("mylang", my_language_command))
+        application.add_handler(CommandHandler("languages", list_languages_command))
+        application.add_handler(CommandHandler("translate", translate_command))
+        application.add_handler(CommandHandler("fact", fact_command))
+        application.add_handler(CommandHandler("history", history_command))
+        application.add_handler(CommandHandler("clear", clear_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+        application.add_error_handler(error_handler)
+        
+        # Start the bot
+        logger.info("✅ Bot started successfully! Ready to translate! 🌍")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to start bot: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
